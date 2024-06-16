@@ -1,20 +1,17 @@
 import sys
 import time
-import dht
 from machine import Pin, I2C
 from adafruit_scd4x import SCD4X
 from sensors.lcd import LCD
 from sensors.temperatureSensor import TemperatureSensor
-from stemma_soil_sensor import StemmaSoilSensor  # Ändrad import
+from stemma_soil_sensor import StemmaSoilSensor
+from hcsr04 import HCSR04  # Ny import
 
 # Lägg till lib-mappen till sökvägarna
 sys.path.append('/lib')
 
 # Skriv ut sys.path för felsökning
 print("sys.path i main.py:", sys.path)
-
-# Skapa en instans av DHT11-sensorn
-dht_sensor = dht.DHT11(Pin(16))
 
 # Skapa en instans av TemperatureSensor för DS18B20-sensorn
 soil_sensor = TemperatureSensor(4)
@@ -55,14 +52,12 @@ except RuntimeError as e:
 except Exception as e:
     print("An unexpected error occurred during StemmaSoilSensor initialization:", e)
 
+# Skapa en instans av HCSR04 för HC-SR04
+distance_sensor = HCSR04(trigger_pin=22, echo_pin=21)  # Anpassa till rätt pinnar
+
 # Funktion för att läsa sensordata och uppdatera LCD
 def update_lcd_with_sensor_data():
     try:
-        # Läs DHT11-data
-        dht_sensor.measure()
-        temperature_dht = dht_sensor.temperature()
-        humidity_dht = dht_sensor.humidity()
-
         # Läs DS18B20-data
         soil_temperatures = soil_sensor.read_temperature()
         soil_temperature = soil_temperatures[0] if soil_temperatures else None
@@ -77,19 +72,29 @@ def update_lcd_with_sensor_data():
 
         if soil_moisture_sensor:
             # Läs fuktighet från jordfuktighetssensorn
-            soil_moisture = soil_moisture_sensor.get_moisture()
-            print("Soil Moisture: {}".format(soil_moisture))  # Felsökningsutskrift
+            try:
+                soil_moisture = soil_moisture_sensor.get_moisture()
+                print("Soil Moisture: {}".format(soil_moisture))  # Felsökningsutskrift
+            except Exception as e:
+                print("Failed to read soil moisture: ", e)
+                soil_moisture = None
         else:
             soil_moisture = None
 
-        # Skriv ut DHT11-data
-        print("DHT11: Temp: {}C, Hum: {}%".format(temperature_dht, humidity_dht))
+        # Läs avstånd från HC-SR04
+        try:
+            distance = distance_sensor.distance_cm()
+            print("Distance: {} cm".format(distance))  # Felsökningsutskrift
+        except Exception as e:
+            print("Failed to read distance: ", e)
+            distance = None
+
         if soil_temperature is not None:
             soil_temperature_formatted = "{:.1f}".format(soil_temperature)
             print("Soil: Temp: {}C".format(soil_temperature_formatted))
         if co2 is not None:
             print("CO2: {}ppm, Temp: {}C, Hum: {}%".format(co2, temperature_scd, humidity_scd))
-            return temperature_dht, humidity_dht, soil_temperature_formatted, co2, temperature_scd, humidity_scd, soil_moisture
+            return soil_temperature_formatted, co2, temperature_scd, humidity_scd, soil_moisture, distance
     except Exception as error:
         print("Exception occurred", error)
         lcd.display_message("Error reading sensors")
@@ -102,7 +107,7 @@ current_page = 0
 def update_lcd_page(sensor_data):
     global current_page
     if sensor_data:
-        temperature_dht, humidity_dht, soil_temperature, co2, temperature_scd, humidity_scd, soil_moisture = sensor_data
+        soil_temperature, co2, temperature_scd, humidity_scd, soil_moisture, distance = sensor_data
         lcd.lcd.clear()
         if current_page == 0:
             lcd.lcd.move_to(0, 0)
@@ -114,20 +119,21 @@ def update_lcd_page(sensor_data):
             lcd.lcd.putstr("Air:")
             lcd.lcd.move_to(0, 1)
             lcd.lcd.putstr("{:.1f}C {:.1f}%".format(temperature_scd, humidity_scd))
-        elif current_page == 2:
-            lcd.lcd.move_to(6, 0)
-            lcd.lcd.putstr("DHT:")
-            lcd.lcd.move_to(0, 1)
-            lcd.lcd.putstr("{}% {}C".format(humidity_dht, temperature_dht))
-        elif current_page == 3 and soil_moisture is not None:
+        elif current_page == 2 and soil_moisture is not None:
             lcd.lcd.move_to(0, 0)
             lcd.lcd.putstr("Soil Moisture:")
             lcd.lcd.move_to(0, 1)
             lcd.lcd.putstr(str(soil_moisture))
+        elif current_page == 3 and distance is not None:
+            lcd.lcd.move_to(0, 0)
+            lcd.lcd.putstr("Distance:")
+            lcd.lcd.move_to(0, 1)
+            lcd.lcd.putstr("{:.1f} cm".format(distance))
         current_page = (current_page + 1) % 4  # Växla till nästa sida
 
 # Huvudloop
 while True:
     sensor_data = update_lcd_with_sensor_data()
-    update_lcd_page(sensor_data)
+    if sensor_data:
+        update_lcd_page(sensor_data)
     time.sleep(5)
