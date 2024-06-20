@@ -1,11 +1,16 @@
 import sys
 import time
-from machine import Pin, I2C
-from adafruit_scd4x import SCD4X
-from sensors.lcd import LCD
-from sensors.temperatureSensor import TemperatureSensor
-from stemma_soil_sensor import StemmaSoilSensor
-from hcsr04 import HCSR04  # Ny import
+import json
+import machine
+import network
+import ssl
+import ubinascii
+import ntptime
+from umqtt.simple import MQTTClient
+import config
+from sensor_setup import setup_sensors
+from lcd_display import update_lcd_page
+from sensor_readings import update_lcd_with_sensor_data
 
 # Lägg till lib-mappen till sökvägarna
 sys.path.append('/lib')
@@ -13,127 +18,106 @@ sys.path.append('/lib')
 # Skriv ut sys.path för felsökning
 print("sys.path i main.py:", sys.path)
 
-# Skapa en instans av TemperatureSensor för DS18B20-sensorn
-soil_sensor = TemperatureSensor(4)
+# Wi-Fi och MQTT-inställningar
+SSID = config.SSID
+WIFI_PASSWORD = config.WIFI_PASSWORD
+MQTT_CLIENT_ID = ubinascii.hexlify(machine.unique_id()).decode()
+MQTT_CLIENT_KEY = 'certs/aws_private.der'
+MQTT_CLIENT_CERT = 'certs/aws_cert.der'
+MQTT_BROKER_CA = 'certs/aws_ca.der'
+MQTT_BROKER = config.IOT_CORE_ENDPOINT
 
-# Skapa en instans av I2C0 (använd samma I2C-buss för alla enheter)
-i2c0 = I2C(0, sda=Pin(0), scl=Pin(1), freq=400000)
+# Initiera I2C och sensorer
+sensors = setup_sensors()
 
-# Skanna I2C0-bussen och skriv ut adresser
-print("I2C0 scan result:", i2c0.scan())
-
-# Skapa en instans av LCD
-try:
-    lcd = LCD(i2c0)  # Använd den gemensamma I2C-instansen
-    print("LCD init success")
-except Exception as e:
-    print("Failed to initialize LCD:", e)
-
-# Skapa en instans av SCD40-sensorn
-scd40_sensor = SCD4X(i2c0)
-
-# Starta periodisk mätning för SCD40
-scd40_sensor.start_periodic_measurement()
-
-# Vänta 30 sekunder för att säkerställa att SCD40-sensorn är redo
-print("Waiting 30 seconds for the SCD40 sensor to stabilize...")
-time.sleep(30)
-
-# Felsökningsutskrifter för StemmaSoilSensor-initialisering
-try:
-    # Skapa en instans av StemmaSoilSensor för jordfuktighetssensorn
-    print("Trying to initialize StemmaSoilSensor on address 0x36")
-    soil_moisture_sensor = StemmaSoilSensor(i2c0, addr=0x36)
-    print("StemmaSoilSensor initialized successfully")
-except RuntimeError as e:
-    print("Failed to initialize StemmaSoilSensor:", e)
-    lcd.display_message("Soil sensor init error")
-    soil_moisture_sensor = None
-except Exception as e:
-    print("An unexpected error occurred during StemmaSoilSensor initialization:", e)
-
-# Skapa en instans av HCSR04 för HC-SR04
-distance_sensor = HCSR04(trigger_pin=22, echo_pin=21)  # Anpassa till rätt pinnar
-
-# Funktion för att läsa sensordata och uppdatera LCD
-def update_lcd_with_sensor_data():
+def read_der(file):
     try:
-        # Läs DS18B20-data
-        soil_temperatures = soil_sensor.read_temperature()
-        soil_temperature = soil_temperatures[0] if soil_temperatures else None
-
-        # Läs SCD40-data
-        if scd40_sensor.data_ready:
-            co2 = scd40_sensor.co2
-            temperature_scd = scd40_sensor.temperature
-            humidity_scd = scd40_sensor.relative_humidity
-        else:
-            co2, temperature_scd, humidity_scd = None, None, None
-
-        if soil_moisture_sensor:
-            # Läs fuktighet från jordfuktighetssensorn
-            try:
-                soil_moisture = soil_moisture_sensor.get_moisture()
-                print("Soil Moisture: {}".format(soil_moisture))  # Felsökningsutskrift
-            except Exception as e:
-                print("Failed to read soil moisture: ", e)
-                soil_moisture = None
-        else:
-            soil_moisture = None
-
-        # Läs avstånd från HC-SR04
-        try:
-            distance = distance_sensor.distance_cm()
-            print("Distance: {} cm".format(distance))  # Felsökningsutskrift
-        except Exception as e:
-            print("Failed to read distance: ", e)
-            distance = None
-
-        if soil_temperature is not None:
-            soil_temperature_formatted = "{:.1f}".format(soil_temperature)
-            print("Soil: Temp: {}C".format(soil_temperature_formatted))
-        if co2 is not None:
-            print("CO2: {}ppm, Temp: {}C, Hum: {}%".format(co2, temperature_scd, humidity_scd))
-            return soil_temperature_formatted, co2, temperature_scd, humidity_scd, soil_moisture, distance
-    except Exception as error:
-        print("Exception occurred", error)
-        lcd.display_message("Error reading sensors")
+        with open(file, "rb") as input:
+            der_data = input.read()
+        print(f"Successfully read {file}")
+        return der_data
+    except Exception as e:
+        print(f"Error reading {file}: {e}")
         return None
+
+key = read_der(MQTT_CLIENT_KEY)
+cert = read_der(MQTT_CLIENT_CERT)
+ca = read_der(MQTT_BROKER_CA)
+
+print("Key content (DER):", key)
+print("Cert content (DER):", cert)
+print("CA content (DER):", ca)
+
+def connect_internet():
+    sta_if = network.WLAN(network.STA_IF)
+    sta_if.active(True)
+    sta_if.connect(SSID, WIFI_PASSWORD)
+    for _ in range(10):
+        if sta_if.isconnected():
+            print("Connected to Wi-Fi")
+            return
+        time.sleep(1)
+    print("Could not connect to Wi-Fi")
+
+def sync_time():
+    try:
+        print("Synchronizing time with NTP server...")
+        ntptime.settime()  # This will set the RTC with the NTP time
+        print("Time synchronized")
+    except Exception as e:
+        print("Failed to synchronize time:", e)
+
+def publish_sensor_data(sensor_readings, mqtt_client):
+    try:
+        mqtt_message = json.dumps(sensor_readings)
+        mqtt_client.publish("pico_w/compost_data", mqtt_message)  # Ändra detta till ditt ämne
+        print(f"Published data: {mqtt_message}")
+    except Exception as e:
+        print(f"Failed to publish data: {e}")
+
+# Anslut till Wi-Fi
+connect_internet()
+
+# Synkronisera tid
+sync_time()
+
+# Kontrollera att nyckel, certifikat och CA laddades korrekt
+if not key or not cert or not ca:
+    print("Failed to read one or more DER files. Exiting.")
+    sys.exit()
+
+# Initiera MQTT-klienten
+mqtt_client = MQTTClient(
+    MQTT_CLIENT_ID,
+    MQTT_BROKER,
+    keepalive=60,
+    ssl=True,
+    ssl_params={
+        "key": key,
+        "cert": cert,
+        "server_hostname": MQTT_BROKER,
+        "cert_reqs": ssl.CERT_REQUIRED,
+        "cadata": ca,
+    },
+)
+
+# Anslut till MQTT
+print("Connecting to MQTT broker")
+try:
+    mqtt_client.connect()
+    print("Connected to MQTT broker")
+except Exception as e:
+    print(f"Failed to connect to MQTT broker: {e}")
+    sys.exit()
 
 # Variabel för att hålla reda på vilken sida som visas
 current_page = 0
 
-# Funktion för att uppdatera LCD-sidor
-def update_lcd_page(sensor_data):
-    global current_page
-    if sensor_data:
-        soil_temperature, co2, temperature_scd, humidity_scd, soil_moisture, distance = sensor_data
-        lcd.lcd.clear()
-        if current_page == 0:
-            lcd.lcd.move_to(0, 0)
-            lcd.lcd.putstr("CO2: {}ppm".format(co2))
-            lcd.lcd.move_to(0, 1)
-            lcd.lcd.putstr("Soil: {}C".format(soil_temperature))
-        elif current_page == 1:
-            lcd.lcd.move_to(6, 0)
-            lcd.lcd.putstr("Air:")
-            lcd.lcd.move_to(0, 1)
-            lcd.lcd.putstr("{:.1f}C {:.1f}%".format(temperature_scd, humidity_scd))
-        elif current_page == 2 and soil_moisture is not None:
-            lcd.lcd.move_to(0, 0)
-            lcd.lcd.putstr("Soil Moisture:")
-            lcd.lcd.move_to(0, 1)
-            lcd.lcd.putstr(str(soil_moisture))
-        elif current_page == 3 and distance is not None:
-            lcd.lcd.move_to(0, 0)
-            lcd.lcd.putstr("Distance:")
-            lcd.lcd.move_to(0, 1)
-            lcd.lcd.putstr("{:.1f} cm".format(distance))
-        current_page = (current_page + 1) % 4  # Växla till nästa sida
-
 # Huvudloop
 while True:
-    sensor_data = update_lcd_with_sensor_data()
-    if sensor_data:
-        update_lcd_page(sensor_data)
+    sensor_readings = update_lcd_with_sensor_data(sensors)
+    if sensor_readings:
+        update_lcd_page(sensor_readings, sensors['lcd'], current_page)
+        current_page = (current_page + 1) % 4  # Växla till nästa sida
+        publish_sensor_data(sensor_readings, mqtt_client)  # Publicera sensorvärden
     time.sleep(5)

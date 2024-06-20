@@ -1,0 +1,7 @@
+# Ignorera certifikat och nycklar
+certs/
+config.py
+
+# Ignorera Python bytecode
+*.pyc
+__pycache__/

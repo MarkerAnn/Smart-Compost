@@ -3,6 +3,7 @@ sys.path.append('/lib')  # Add the lib folder to the path
 
 from machine import Pin, I2C
 from pico_i2c_lcd import I2cLcd
+import utime
 
 # Class to handle the LCD
 class LCD:
@@ -36,3 +37,10 @@ class LCD:
             self.lcd.putstr(string)
         except Exception as e:
             print("Failed to write string to LCD:", e)
+    
+    # Function to turn off the LCD backlight
+    def backlight_off(self):
+        try:
+            self.lcd.backlight_off()
+        except Exception as e:
+            print("Failed to turn off backlight:", e)
