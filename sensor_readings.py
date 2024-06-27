@@ -6,11 +6,11 @@ def update_lcd_with_sensor_data(sensors):
     distance_sensor = sensors['distance_sensor']
 
     try:
-        # Läs DS18B20-data
+        # Read DS18B20-data
         soil_temperatures = soil_sensor.read_temperature()
         soil_temperature = soil_temperatures[0] if soil_temperatures else None
 
-        # Läs SCD40-data
+        # Read SCD40-data
         if scd40_sensor.data_ready:
             co2 = scd40_sensor.co2
             temperature_scd = scd40_sensor.temperature
@@ -19,7 +19,7 @@ def update_lcd_with_sensor_data(sensors):
             co2, temperature_scd, humidity_scd = None, None, None
 
         if soil_moisture_sensor:
-            # Läs fuktighet från jordfuktighetssensorn
+            # Read mosture data
             try:
                 soil_moisture = soil_moisture_sensor.get_moisture()
                 print("Soil Moisture: {}".format(soil_moisture))  # Felsökningsutskrift
@@ -29,10 +29,10 @@ def update_lcd_with_sensor_data(sensors):
         else:
             soil_moisture = None
 
-        # Läs avstånd från HC-SR04
+        # Read the distance from HC-SR04
         try:
             distance = distance_sensor.distance_cm()
-            print("Distance: {} cm".format(distance))  # Felsökningsutskrift
+            print("Distance: {} cm".format(distance)) 
         except Exception as e:
             print("Failed to read distance: ", e)
             distance = None

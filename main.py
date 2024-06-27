@@ -1,4 +1,3 @@
-
 import sys
 import time
 import json
@@ -49,17 +48,29 @@ if not key or not cert or not ca:
     print("Failed to read one or more DER files. Exiting.")
     sys.exit()
 
-def connect_internet():
-    sta_if = network.WLAN(network.STA_IF)
-    sta_if.active(True)
-    sta_if.connect(SSID, WIFI_PASSWORD)
-    for _ in range(10):
-        if sta_if.isconnected():
-            print("Connected to Wi-Fi")
-            return
-        time.sleep(1)
-    print("Could not connect to Wi-Fi")
-    sys.exit()
+def connect_wifi(ssid, password):
+    wlan = network.WLAN(network.STA_IF)
+    wlan.active(True)
+    if not wlan.isconnected():
+        print('Connecting to WiFi...')
+        wlan.connect(ssid, password)
+        for attempt in range(10):
+            if wlan.isconnected():
+                print('Connected to WiFi. IP:', wlan.ifconfig()[0])
+                return True
+            time.sleep(1)
+        print('Failed to connect to WiFi')
+        return False
+    else:
+        print('Already connected to WiFi.')
+        return True
+
+def disconnect_wifi():
+    wlan = network.WLAN(network.STA_IF)
+    if wlan.isconnected():
+        wlan.disconnect()
+        wlan.active(False)
+        print('Disconnected from WiFi')
 
 def sync_time(retries=5, delay=5):
     for attempt in range(retries):
@@ -92,17 +103,18 @@ def initialize_mqtt_client():
 def publish_sensor_data(sensor_readings, mqtt_client):
     try:
         mqtt_message = json.dumps(sensor_readings)
-        print(f"Attempting to publish data to topic 'pico_w/compost_data': {mqtt_message}")  # Log before publishing
+        print(f"Attempting to publish data to topic 'pico_w/compost_data': {mqtt_message}")
         mqtt_client.publish("pico_w/compost_data", mqtt_message)
         print(f"Published data: {mqtt_message}")
     except Exception as e:
         print(f"Failed to publish data: {e}")
+    finally:
+        mqtt_client.disconnect()
+        print("Disconnected from MQTT broker")
 
-# Connect to Wi-Fi
-connect_internet()
-
-# Synchronize time
-time_synchronized = sync_time()
+# Connect to Wi-Fi and Sync Time
+if connect_wifi(SSID, WIFI_PASSWORD):
+    time_synchronized = sync_time()
 
 # Variable to keep track of which page is being displayed
 current_page = 0
@@ -111,7 +123,7 @@ current_page = 0
 sensor_readings = {}
 
 # Main loop
-MEASUREMENT_INTERVAL = 600  # Measure sensor data every 10 minutes
+MEASUREMENT_INTERVAL = 21600  # Measure sensor data every 6 hours
 last_page_update_time = time.time()
 last_measurement_time = time.time() - MEASUREMENT_INTERVAL  # First measurement should happen immediately
 
@@ -127,20 +139,20 @@ while True:
 
     # Collect and publish sensor data every MEASUREMENT_INTERVAL seconds
     if current_time - last_measurement_time >= MEASUREMENT_INTERVAL:
-        mqtt_client = initialize_mqtt_client()  # Initialize MQTT client
-        print("Connecting to MQTT broker")
-        try:
-            mqtt_client.connect()
-            print("Connected to MQTT broker")
-            new_sensor_readings = update_lcd_with_sensor_data(sensors)
-            if new_sensor_readings:
-                sensor_readings = new_sensor_readings  # Update sensor readings
-                print(f"New sensor readings: {sensor_readings}")  # Log sensor readings
-                publish_sensor_data(sensor_readings, mqtt_client)  # Publish sensor data to MQTT
-            mqtt_client.disconnect() # Disconnect from MQTT broker
-            print("Disconnected from MQTT broker")
-        except Exception as e:
-            print(f"Failed to connect to MQTT broker: {e}")
+        if connect_wifi(SSID, WIFI_PASSWORD):
+            mqtt_client = initialize_mqtt_client()
+            print("Connecting to MQTT broker")
+            try:
+                mqtt_client.connect()
+                print("Connected to MQTT broker")
+                new_sensor_readings = update_lcd_with_sensor_data(sensors)
+                if new_sensor_readings:
+                    sensor_readings = new_sensor_readings
+                    print(f"New sensor readings: {sensor_readings}")
+                    publish_sensor_data(sensor_readings, mqtt_client)
+            except Exception as e:
+                print(f"Failed to connect to MQTT broker: {e}")
+            disconnect_wifi()
         last_measurement_time = current_time
 
     time.sleep(1)  # Wait a second before next iteration
